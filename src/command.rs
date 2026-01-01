@@ -1,5 +1,6 @@
 use crate::device::REPORT_ID;
 use crate::types::{CommandId, EEPROMAddress, Error};
+use strum::IntoEnumIterator;
 
 // These are hardcoded for now as i don't know if there are other devices with different values.
 // If that is the case then these can be set dynamically
@@ -25,6 +26,7 @@ pub struct Command<T: CommandDescriptor> {
     command_id: CommandId,
     status: u8,
     eeprom_address: EEPROMAddress,
+    eeprom_offset: u8,
     data_len: usize,
     data: Vec<u8>,
     checksum: u8,
@@ -37,6 +39,7 @@ impl<T: CommandDescriptor> Clone for Command<T> {
             command_id: self.command_id,
             status: self.status,
             eeprom_address: self.eeprom_address,
+            eeprom_offset: self.eeprom_offset,
             data_len: self.data_len,
             data: self.data.clone(),
             checksum: self.checksum,
@@ -55,10 +58,13 @@ impl<T: CommandDescriptor> std::fmt::Display for Command<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ID: {:?}\nStatus: {}\nAddress: {:?}\nData Length: {}\nData: {:X?}\nChecksum: {}",
+            "ID: {:?}\nStatus: {}\nAddress: {:?} (0x{:X?}) + Offset (0x{:02X?}) = 0x{:X?}\nData Length: {}\nData: {:X?}\nChecksum: 0x{:02X?}",
             self.command_id,
             self.status,
             self.eeprom_address,
+            self.eeprom_address as u16,
+            self.eeprom_offset,
+            self.eeprom_address as u16 + self.eeprom_offset as u16,
             self.data_len,
             &self.data[..self.data_len],
             self.checksum
@@ -72,6 +78,7 @@ impl<T: CommandDescriptor> Default for Command<T> {
             command_id: CommandId::Zero,
             status: 0,
             eeprom_address: EEPROMAddress::ReportRate,
+            eeprom_offset: 0,
             data_len: 0,
             data: vec![0u8; CMD_LEN - BASE_OFFSET - 1],
             checksum: 0,
@@ -101,7 +108,14 @@ impl<T: CommandDescriptor> TryFrom<&[u8]> for Command<T> {
 
         let command_id = raw[0x0].try_into()?;
         let status = raw[0x1];
-        let eeprom_address = u16::from_be_bytes([raw[0x2], raw[0x3]]).try_into()?;
+        let raw_eeprom_address = u16::from_be_bytes([raw[0x2], raw[0x3]]);
+        let eeprom_address: EEPROMAddress = EEPROMAddress::iter()
+            .map(|x| x as u16)
+            .filter(|&x| x <= raw_eeprom_address)
+            .max()
+            .map(|x| x.try_into())
+            .expect("Invalid EEPROM address")?;
+        let eeprom_offset = (raw_eeprom_address - (eeprom_address as u16)) as u8;
         let data_len = raw[0x4] as usize;
         let data = raw[BASE_OFFSET..BASE_OFFSET + data_len].to_vec();
         let checksum = raw[0xf];
@@ -110,6 +124,7 @@ impl<T: CommandDescriptor> TryFrom<&[u8]> for Command<T> {
             command_id,
             status,
             eeprom_address,
+            eeprom_offset,
             data_len,
             data,
             checksum,
@@ -221,6 +236,15 @@ impl<T: CommandDescriptor> Command<T> {
         self.set_checksum();
     }
 
+    pub fn eeprom_offset(&self) -> u8 {
+        self.eeprom_offset
+    }
+
+    pub fn set_eeprom_offset(&mut self, offset: u8) {
+        self.eeprom_offset = offset;
+        self.set_checksum();
+    }
+
     /// Returns the valid length of the data payload.
     pub fn data_len(&self) -> usize {
         self.data_len
@@ -233,7 +257,7 @@ impl<T: CommandDescriptor> Command<T> {
     /// Panics if the provided length exceeds the maximum available space computed via:
     /// `CMD_LEN - BASE_OFFSET`
     pub fn set_data_len(&mut self, len: usize) -> Result<(), Error> {
-        if len as usize > CMD_LEN - BASE_OFFSET {
+        if len > CMD_LEN - BASE_OFFSET {
             return Err(Error::DataTooLarge(len));
         }
 
@@ -247,11 +271,14 @@ impl<T: CommandDescriptor> Command<T> {
             let mut sum = REPORT_ID as u16;
             sum += self.command_id as u16;
             sum += self.status as u16;
-            sum += self.eeprom_address as u16;
+            sum += (self.eeprom_address as u16 & 0xFF00) >> 8;
+            sum += self.eeprom_address as u16 & 0x00FF;
+            sum += self.eeprom_offset as u16;
             sum += self.data_len as u16;
             sum += self.data.iter().fold(0, |acc, &byte| acc + byte as u16);
             (sum & 0xff) as u8
         };
+        // let checksum = 0x52u8.wrapping_sub(sum);
         let checksum = 0x55u8.wrapping_sub(sum);
         self.checksum = checksum;
     }
@@ -271,7 +298,8 @@ impl<T: CommandDescriptor> Command<T> {
     /// A vector containing the bytewise representation of the command.
     pub fn as_bytes(&self) -> Vec<u8> {
         let mut raw = vec![self.command_id as u8, self.status];
-        raw.extend_from_slice(&(self.eeprom_address as u16).to_be_bytes());
+        let true_eeprom_address = (self.eeprom_address as u16) + (self.eeprom_offset as u16);
+        raw.extend_from_slice(&true_eeprom_address.to_be_bytes());
         raw.push(self.data_len as u8);
         raw.extend_from_slice(&self.data);
         // Pad the remaining bytes with zeroes
@@ -314,5 +342,85 @@ impl<T: CommandDescriptor> CommandBuilder<T> {
 
     pub fn build(self) -> Command<T> {
         self.command
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libatk_derive::Command;
+
+    #[derive(Command)]
+    struct MacroCommand {}
+
+    #[test]
+    fn checksum_1() -> Result<(), Error> {
+        let mut command = Command::<MacroCommand>::default();
+        command.set_id(CommandId::SetEEPROM);
+        command.set_status(0x00);
+        command.set_eeprom_address(EEPROMAddress::Macro0);
+        command.set_data_len(0x0a)?;
+        command.set_data(
+            &[0x08, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0xff],
+            0x00,
+        )?;
+
+        assert_eq!(command.checksum, 0x22);
+        Ok(())
+    }
+
+    #[test]
+    fn checksum_2() -> Result<(), Error> {
+        let mut command = Command::<MacroCommand>::default();
+        command.set_id(CommandId::SetEEPROM);
+        command.set_status(0x00);
+        command.set_eeprom_address(EEPROMAddress::Macro0);
+        command.set_eeprom_offset(0x0a);
+        command.set_data_len(0x0a)?;
+        command.set_data(
+            &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            0x00,
+        )?;
+
+        assert_eq!(command.checksum, 0x39);
+        Ok(())
+    }
+
+    #[test]
+    fn checksum_3() -> Result<(), Error> {
+        let mut command = Command::<MacroCommand>::default();
+        command.set_id(CommandId::SetEEPROM);
+        command.set_status(0x00);
+        command.set_eeprom_address(EEPROMAddress::Macro0);
+        command.set_eeprom_offset(0x14);
+        command.set_data_len(0x0a)?;
+        command.set_data(
+            &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            0x00,
+        )?;
+
+        assert_eq!(command.checksum, 0x2f);
+        Ok(())
+    }
+
+    #[test]
+    fn checksum_4() -> Result<(), Error> {
+        let mut command = Command::<MacroCommand>::default();
+        command.set_id(CommandId::SetEEPROM);
+        command.set_status(0x00);
+        command.set_eeprom_address(EEPROMAddress::Macro3);
+        command.set_eeprom_offset(0x00);
+        command.set_data_len(0x0a)?;
+        command.set_data(
+            &[0x08, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0xff],
+            0x00,
+        )?;
+
+        assert_eq!(
+            command.checksum, 0x9e,
+            "Expected checksum of 0x9E, but command is\n```\n{}\n```\ninstead",
+            command
+        );
+        Ok(())
     }
 }

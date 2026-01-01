@@ -1,3 +1,5 @@
+use strum_macros::EnumIter;
+
 #[derive(Debug)]
 pub enum Error {
     InvalidBufferLength {
@@ -97,7 +99,7 @@ impl TryFrom<u8> for CommandId {
 }
 
 #[repr(u16)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, EnumIter)]
 #[allow(dead_code)]
 pub enum EEPROMAddress {
     ReportRate = 0x0,
@@ -231,7 +233,9 @@ impl TryFrom<u16> for EEPROMAddress {
             | 0x100 | 0x120 | 0x140 | 0x160 | 0x180 | 0x1a0 | 0x1c0 | 0x1e0 | 0x200 | 0x220
             | 0x240 | 0x260 | 0x280 | 0x2a0 | 0x2c0 | 0x2e0 | 0x300 | 0x480 | 0x600 | 0x780
             | 0x900 | 0xa80 | 0xc00 | 0xd80 | 0xf00 | 0x1080 | 0x1200 | 0x1380 | 0x1500
-            | 0x1680 | 0x1800 | 0x1980 => unsafe { Ok(std::mem::transmute(value)) },
+            | 0x1680 | 0x1800 | 0x1980 => unsafe {
+                Ok(std::mem::transmute::<u16, EEPROMAddress>(value))
+            },
             _ => Err(Error::InvalidEEPROMAddress(value)),
         }
     }

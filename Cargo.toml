@@ -13,3 +13,5 @@ hidapi = { version = "2.6.3", default-features = false, features = [
     "linux-shared-hidraw",
 ] }
 libatk-derive = "0.1.7"
+strum = "0.27.2"
+strum_macros = "0.27.2"
