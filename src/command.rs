@@ -26,7 +26,7 @@ pub struct Command<T: CommandDescriptor> {
     command_id: CommandId,
     status: u8,
     eeprom_address: EEPROMAddress,
-    eeprom_offset: u8,
+    eeprom_offset: u16,
     data_len: usize,
     data: Vec<u8>,
     checksum: u8,
@@ -64,7 +64,7 @@ impl<T: CommandDescriptor> std::fmt::Display for Command<T> {
             self.eeprom_address,
             self.eeprom_address as u16,
             self.eeprom_offset,
-            self.eeprom_address as u16 + self.eeprom_offset as u16,
+            self.eeprom_address as u16 + self.eeprom_offset,
             self.data_len,
             &self.data[..self.data_len],
             self.checksum
@@ -115,7 +115,7 @@ impl<T: CommandDescriptor> TryFrom<&[u8]> for Command<T> {
             .max()
             .map(|x| x.try_into())
             .expect("Invalid EEPROM address")?;
-        let eeprom_offset = (raw_eeprom_address - (eeprom_address as u16)) as u8;
+        let eeprom_offset = raw_eeprom_address - (eeprom_address as u16);
         let data_len = raw[0x4] as usize;
         let data = raw[BASE_OFFSET..BASE_OFFSET + data_len].to_vec();
         let checksum = raw[0xf];
@@ -236,13 +236,25 @@ impl<T: CommandDescriptor> Command<T> {
         self.set_checksum();
     }
 
-    pub fn eeprom_offset(&self) -> u8 {
+    /// Returns the EEPROM address offset associated with the command.
+    pub fn eeprom_offset(&self) -> u16 {
         self.eeprom_offset
     }
 
-    pub fn set_eeprom_offset(&mut self, offset: u8) {
+    /// Sets the EEPROM address offset and updates the checksum.
+    pub fn set_eeprom_offset(&mut self, offset: u16) -> Result<(), Error> {
+        let next_valid_eeprom: u16 = EEPROMAddress::iter()
+            .filter(|&x| x as u16 > self.eeprom_address as u16)
+            .map(|x| x as u16)
+            .min()
+            .ok_or(Error::InvalidOffset(offset as usize))?;
+        let candidate_address = self.eeprom_address as u16 + offset;
+        if candidate_address >= next_valid_eeprom {
+            return Err(Error::InvalidEEPROMAddress(candidate_address));
+        }
         self.eeprom_offset = offset;
         self.set_checksum();
+        Ok(())
     }
 
     /// Returns the valid length of the data payload.
@@ -271,9 +283,11 @@ impl<T: CommandDescriptor> Command<T> {
             let mut sum = REPORT_ID as u16;
             sum += self.command_id as u16;
             sum += self.status as u16;
-            sum += (self.eeprom_address as u16 & 0xFF00) >> 8;
-            sum += self.eeprom_address as u16 & 0x00FF;
-            sum += self.eeprom_offset as u16;
+            sum += (self.eeprom_address as u16)
+                .to_be_bytes()
+                .iter()
+                .fold(0, |acc, &byte| acc + byte as u16);
+            sum += self.eeprom_offset;
             sum += self.data_len as u16;
             sum += self.data.iter().fold(0, |acc, &byte| acc + byte as u16);
             (sum & 0xff) as u8
@@ -288,7 +302,7 @@ impl<T: CommandDescriptor> Command<T> {
     /// The serialization follows this order:
     /// 1. Command ID
     /// 2. Status
-    /// 3. EEPROM address as big-endian bytes
+    /// 3. EEPROM address + offset as big-endian bytes
     /// 4. Valid data length
     /// 5. Data payload
     /// 6. Checksum
@@ -298,8 +312,8 @@ impl<T: CommandDescriptor> Command<T> {
     /// A vector containing the bytewise representation of the command.
     pub fn as_bytes(&self) -> Vec<u8> {
         let mut raw = vec![self.command_id as u8, self.status];
-        let true_eeprom_address = (self.eeprom_address as u16) + (self.eeprom_offset as u16);
-        raw.extend_from_slice(&true_eeprom_address.to_be_bytes());
+        let eeprom_address = (self.eeprom_address as u16) + self.eeprom_offset;
+        raw.extend_from_slice(&eeprom_address.to_be_bytes());
         raw.push(self.data_len as u8);
         raw.extend_from_slice(&self.data);
         // Pad the remaining bytes with zeroes
@@ -375,7 +389,7 @@ mod tests {
         command.set_id(CommandId::SetEEPROM);
         command.set_status(0x00);
         command.set_eeprom_address(EEPROMAddress::Macro0);
-        command.set_eeprom_offset(0x0a);
+        command.set_eeprom_offset(0x0a)?;
         command.set_data_len(0x0a)?;
         command.set_data(
             &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
@@ -392,7 +406,7 @@ mod tests {
         command.set_id(CommandId::SetEEPROM);
         command.set_status(0x00);
         command.set_eeprom_address(EEPROMAddress::Macro0);
-        command.set_eeprom_offset(0x14);
+        command.set_eeprom_offset(0x14)?;
         command.set_data_len(0x0a)?;
         command.set_data(
             &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
@@ -409,7 +423,7 @@ mod tests {
         command.set_id(CommandId::SetEEPROM);
         command.set_status(0x00);
         command.set_eeprom_address(EEPROMAddress::Macro3);
-        command.set_eeprom_offset(0x00);
+        command.set_eeprom_offset(0x00)?;
         command.set_data_len(0x0a)?;
         command.set_data(
             &[0x08, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0xff],
@@ -422,5 +436,58 @@ mod tests {
             command
         );
         Ok(())
+    }
+
+    #[test]
+    fn try_from_vec() -> Result<(), Error> {
+        let data: Vec<u8> = vec![
+            0x07, 0x00, 0x07, 0x8a, 0x0a, 0x08, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+            0xff, 0x9e,
+        ];
+
+        let parsed_command = Command::<MacroCommand>::try_from(data)?;
+
+        assert_eq!(
+            parsed_command.command_id,
+            CommandId::SetEEPROM,
+            "Incorrect command ID."
+        );
+        assert_eq!(parsed_command.status, 0x00, "Incorrect command status.");
+        assert_eq!(
+            parsed_command.eeprom_address,
+            EEPROMAddress::Macro3,
+            "Incorrect EEPROM address."
+        );
+        assert_eq!(
+            parsed_command.eeprom_offset, 0x0a,
+            "Incorrect EEPROM offset."
+        );
+        assert_eq!(parsed_command.data_len, 0x0a, "Incorrect data length.");
+        assert_eq!(
+            parsed_command.data,
+            vec![0x08, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0xff],
+            "Incorrect data bytes."
+        );
+        assert_eq!(parsed_command.checksum, 0x9e, "Incorrect checksum.");
+        Ok(())
+    }
+
+    #[test]
+    fn eeprom_offset_out_of_range() -> Result<(), Error> {
+        let mut command = Command::<MacroCommand>::default();
+        command.set_id(CommandId::SetEEPROM);
+        command.set_status(0);
+        command.set_eeprom_address(EEPROMAddress::Macro0);
+        let invalid_offset: u16 = 0x180;
+        match command.set_eeprom_offset(invalid_offset) {
+            Ok(_) => Err(Error::InvalidEEPROMAddress(
+                command.eeprom_address as u16 + command.eeprom_offset,
+            )),
+            Err(Error::InvalidEEPROMAddress(_)) => Ok(()),
+            Err(Error::InvalidOffset(_)) => {
+                unreachable!("This should only occur if the current EEPROM address is the maximum. EEPROM Address: {:02X?}, Offset: {:02X?}", command.eeprom_address as u16, command.eeprom_offset)
+            }
+            _ => unreachable!("This should never happen"),
+        }
     }
 }

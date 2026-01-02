@@ -30,17 +30,17 @@ impl std::fmt::Display for Error {
                 )
             }
             Error::InvalidCommandId(id) => format!("Invalid CommandID: {}", id),
-            Error::InvalidEEPROMAddress(addr) => format!("Invalid EEPROM Address: {}", addr),
-            Error::InvalidOffset(offset) => format!("Invalid Offset: {}", offset),
+            Error::InvalidEEPROMAddress(addr) => format!("Invalid EEPROM Address: 0x{:02X?}", addr),
+            Error::InvalidOffset(offset) => format!("Invalid Offset: 0x{:02X?}", offset),
             Error::HidError(e) => e.to_string(),
             Error::DataTooLarge(len) => format!("Length is larger than the maximum possible: {}", len),
             Error::InvalidDataLength {
                 offset,
                 data_len,
                 allowed,
-            } => format!("Invalid data len: Tried to write {} bytes, Only {} bytes can be written at offset {}, ", data_len, allowed, offset),
+            } => format!("Invalid data len: Tried to write {} bytes, Only {} bytes can be written at offset 0x{:02X?}, ", data_len, allowed, offset),
             Error::OffsetNotAligned(offset) => format!(
-                "Provided offset is not aligned to a byte pair boundary: {}",
+                "Provided offset is not aligned to a byte pair boundary: 0x{:02X?}",
                 offset
             ),
             Error::ParseError(e) => e.clone(),
@@ -53,7 +53,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
 pub enum CommandId {
     /// Not a valid CommandID, used for initialization
@@ -92,14 +92,14 @@ impl TryFrom<u8> for CommandId {
     type Error = Error;
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0x0..=0x1b => unsafe { Ok(std::mem::transmute(value)) },
+            0x0..=0x1b => unsafe { Ok(std::mem::transmute::<u8, CommandId>(value)) },
             _ => Err(Error::InvalidCommandId(value)),
         }
     }
 }
 
 #[repr(u16)]
-#[derive(Debug, Clone, Copy, EnumIter)]
+#[derive(Debug, Clone, Copy, PartialEq, EnumIter)]
 #[allow(dead_code)]
 pub enum EEPROMAddress {
     ReportRate = 0x0,
