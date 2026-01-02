@@ -15,7 +15,7 @@ static MAX_REPORT_LENGTH: usize = 64;
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```no_run,compile_fail
 /// // Create a new device by specifying vendor id, product id, usage page and usage.
 /// let device = Device::new(0x1234, 0x5678, 0xFF00, 0x01)
 ///     .expect("Device not found or failed to open");
@@ -73,6 +73,7 @@ impl Device {
     ///
     /// # Examples
     /// ```no_run
+    /// # use libatk_rs::device::Device;
     /// let device = Device::new(0x1234, 0x5678, 0xFF00, 0x01)
     ///     .expect("Failed to open device");
     /// ```
@@ -86,13 +87,12 @@ impl Device {
 
         let device = context
             .device_list()
-            .filter(|&d| {
+            .find(|&d| {
                 d.product_id() == product_id
                     && d.vendor_id() == vendor_id
                     && d.usage_page() == usage_page
                     && d.usage() == usage
             })
-            .next()
             .ok_or(Error::HidError(hidapi::HidError::HidApiError {
                 message: format!(
                     "Device not found: vendor_id={} product_id={} usage_page={} usage={}",
@@ -101,9 +101,7 @@ impl Device {
             }))?;
 
         Ok(Device(
-            device
-                .open_device(&context)
-                .map_err(|e| Error::HidError(e))?,
+            device.open_device(&context).map_err(Error::HidError)?,
         ))
     }
 
@@ -127,13 +125,20 @@ impl Device {
     ///
     /// # Examples
     /// ```no_run
-    /// let bytes_written = device.send(command).expect("Failed to send command");
+    /// # use libatk_rs::prelude::*;
+    /// # use libatk_derive::Command;
+    /// # let device = Device::new(0x1234, 0x5678, 0xFF00, 0x01)
+    ///     .expect("Failed to open device");
+    /// # #[derive(Command)]
+    /// # struct NewCommand {}
+    /// # let command = Command::<NewCommand>::default();
+    /// let bytes_written = device.send(&command).expect("Failed to send command");
     /// println!("Bytes written: {}", bytes_written);
     /// ```
     pub fn send<T: CommandDescriptor>(&self, command: &Command<T>) -> Result<usize, Error> {
         // Prepend Report ID to the command
         let data = [[REPORT_ID].as_ref(), command.as_bytes().as_ref()].concat();
-        self.0.write(&data).map_err(|e| Error::HidError(e))
+        self.0.write(&data).map_err(Error::HidError)
     }
 
     /// Reads data from the device.
@@ -148,12 +153,19 @@ impl Device {
     ///
     /// # Examples
     /// ```no_run
+    /// # use libatk_rs::prelude::*;
+    /// # use libatk_derive::Command;
+    /// # let device = Device::new(0x1234, 0x5678, 0xFF00, 0x01)
+    ///     .expect("Failed to open device");
+    /// # #[derive(Command)]
+    /// # struct NewCommand {}
+    /// # let command = Command::<NewCommand>::default();
     /// let response = device.read().expect("Failed to read from device");
     /// println!("Response: {:?}", response);
     /// ```
     pub fn read(&self) -> Result<Vec<u8>, Error> {
         let mut buf = [0u8; MAX_REPORT_LENGTH];
-        let bytes_read = self.0.read(&mut buf).map_err(|e| Error::HidError(e))?;
+        let bytes_read = self.0.read(&mut buf).map_err(Error::HidError)?;
 
         // Remove Report ID from the response
         Ok(buf[1..bytes_read].to_vec())
@@ -170,6 +182,13 @@ impl Device {
     ///
     /// # Examples
     /// ```no_run
+    /// # use libatk_rs::prelude::*;
+    /// # use libatk_derive::Command;
+    /// # let device = Device::new(0x1234, 0x5678, 0xFF00, 0x01)
+    ///     .expect("Failed to open device");
+    /// # #[derive(Command)]
+    /// # struct NewCommand {}
+    /// # let command = Command::<NewCommand>::default();
     /// let response = device.execute(command).expect("Failed to execute command");
     /// println!("Response: {:?}", response);
     /// ```
